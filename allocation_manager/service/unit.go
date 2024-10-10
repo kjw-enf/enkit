@@ -7,6 +7,7 @@ import (
 	"time"
 
 	apb "github.com/enfabrica/enkit/allocation_manager/proto"
+	"github.com/enfabrica/enkit/lib/logger"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -53,18 +54,6 @@ type unit struct { // store topologies describing actual hardware
 	Invocation *invocation  // request for a Unit allocation
 }
 
-/* TODO: move queue out
-// Enqueue puts the supplied invocation at the back of the queue. Returns the
-// 1-based index the invocation was queued at.
-func (u *unit) Enqueue(inv *invocation) Position {
-	defer u.updateMetrics()
-	u.queue.Enqueue(inv)
-	u.prioritizer.OnEnqueue(inv)
-	u.queue.Sort(u.prioritizer.Sorter())
-	return u.queue.Position(inv)
-}
-*/
-
 // Allocate attempts to associate the supplied invocation with this Unit.
 // Returns whether this Unit was successfully allocated.
 func (u *unit) Allocate(inv *invocation) bool {
@@ -73,24 +62,27 @@ func (u *unit) Allocate(inv *invocation) bool {
 		return false
 	}
 	// u.prioritizer.OnAllocate(inv)
+	logger.Go.Infof("unit.Allocate %s to %s\n", u.Topology.Name, inv.ID)
 	u.Invocation = inv
 	return true
 }
 
-// TODO: move queue out
-//// Promote attempts to promote queued requests to allocations until either no
-//// licenses remain or no queued requests remain.
-//func (u *unit) Promote() {
-//	defer u.updateMetrics()
-//	numFree := u.totalAvailable - len(u.allocations)
-//	for i := 0; i < numFree && u.queue.Len() > 0; i++ {
-//		u.queue.Sort(u.prioritizer.Sorter())
-//		invocation := u.queue.Dequeue()
-//		u.prioritizer.OnDequeue(invocation)
-//		u.prioritizer.OnAllocate(invocation)
-//		u.allocations[invocation.ID] = invocation
-//	}
-//}
+func (u *unit) IsAllocated() bool {
+	return nil != u.Invocation
+}
+
+// TODO: decide actual values to go in here
+func (u *unit) IsHealthy() bool {
+	switch u.Health {
+	case apb.Health_HEALTH_BROKEN: // maybe later
+		return true
+	case apb.Health_HEALTH_UNKNOWN: // maybe soon
+		return true
+	case apb.Health_HEALTH_READY: // yes
+		return true
+	}
+	return false
+}
 
 // GetInvocation returns an invocation by ID if the invocation is allocated a
 // unit, or nil otherwise.
@@ -108,34 +100,39 @@ func (u *unit) ExpireAllocations(expiry time.Time) {
 	if u.Invocation != nil && !u.Invocation.LastCheckin.After(expiry) {
 		// u.prioritizer.OnRelease(v)
 		// metricLicenseReleaseReason.WithLabelValues("allocated_expired").Inc()
+		logger.Go.Infof("unit.ExpireAllocations %v", u.Invocation.ID)
 		u.Invocation = nil
 		// move health to unknown?
 	}
 }
 
-/* TODO: Move into queue
-// ExpireQueued removes all queued invocations that have not checked in since
-// `expiry`.
-func (u *unit) ExpireQueued(expiry time.Time) {
+// Forget removes invocations matching the specified ID from allocations and
+// the queue.
+func (u *unit) Forget(invID string) int {
 	defer u.updateMetrics()
-	u.queue.Filter(func(pos Position, inv *invocation) bool {
-		if inv.LastCheckin.After(expiry) {
-			return false
+	/*
+		newAllocations := map[string]*invocation{}
+		for k, v := range u.allocations {
+			if k == invID {
+				u.prioritizer.OnRelease(v)
+				count++
+				continue
+			}
+			newAllocations[k] = v
 		}
-		u.prioritizer.OnDequeue(inv)
-		metricLicenseReleaseReason.WithLabelValues("queued_expired").Inc()
-		return true
-	})
+		if inv := u.queue.Forget(invID); inv != nil {
+			u.prioritizer.OnDequeue(inv)
+			count += 1
+		}
+		u.allocations = newAllocations
+	*/
+	if u.Invocation != nil && invID == u.Invocation.ID {
+		logger.Go.Infof("unit.Forget(%v)", u.Invocation.ID)
+		u.Invocation = nil
+		return 1
+	}
+	return 0
 }
-
-// GetQueued returns an invocation by ID if the invocation is queued, or nil
-// otherwise. If the returned invocation is not nil, the 1-based index (queue
-// position) is also returned.
-func (u *unit) GetQueued(invID string) (*invocation, Position) {
-	inv, pos := u.queue.Get(invID)
-	return inv, pos
-}
-*/
 
 // GetStats returns a Stats message for this Unit.
 func (u *unit) GetStats() *apb.Stats {
@@ -164,33 +161,6 @@ func (u *unit) GetStats() *apb.Stats {
 		Status:    status,
 		Timestamp: timestamppb.New(timeNow()),
 	}
-}
-
-// Forget removes invocations matching the specified ID from allocations and
-// the queue.
-func (u *unit) Forget(invID string) int {
-	defer u.updateMetrics()
-	count := 0
-	/*
-		newAllocations := map[string]*invocation{}
-		for k, v := range u.allocations {
-			if k == invID {
-				u.prioritizer.OnRelease(v)
-				count++
-				continue
-			}
-			newAllocations[k] = v
-		}
-		if inv := u.queue.Forget(invID); inv != nil {
-			u.prioritizer.OnDequeue(inv)
-			count += 1
-		}
-		u.allocations = newAllocations
-	*/
-	if u.Invocation != nil && invID == u.Invocation.ID {
-		u.Invocation = nil
-	}
-	return count
 }
 
 func (u *unit) updateMetrics() {

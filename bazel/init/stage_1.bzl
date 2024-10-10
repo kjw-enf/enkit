@@ -143,7 +143,10 @@ def stage_1():
         sha256 = "51d676b6846440210da48899e4df618a357e6e44ecde7106f1e44ea16ae8adc7",
         strip_prefix = "abseil-cpp-20230125.3",
         patch_args = ["-p1"],
-        patches = ["@enkit//bazel/dependencies/abseil:0001-absl-flags-parse.cc-provide-a-mechanism-to-let-other.patch"],
+        patches = [
+            "@enkit//bazel/dependencies/abseil:0001-absl-flags-parse.cc-provide-a-mechanism-to-let-other.patch",
+            "@enkit//bazel/dependencies/abseil:0002-remove-maes-and-msse4.1-option-from-cross-compilation.patch",
+        ],
         urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20230125.3.zip"],
     )
 
@@ -174,11 +177,27 @@ def stage_1():
     )
 
     maybe(
+        name = "boringssl",
+        repo_rule = http_archive,
+        patch_args = ["-p1"],
+        patches = [
+            "@enkit//bazel/dependencies/boringssl:0001-ignore-pedantic-warnings-and-move-hrss-polynomial-declarations-under-x64-flag.patch",
+        ],
+        sha256 = "534fa658bd845fd974b50b10f444d392dfd0d93768c4a51b61263fd37d851c40",
+        strip_prefix = "boringssl-b9232f9e27e5668bc0414879dcdedb2a59ea75f2",
+        urls = [
+            "https://storage.googleapis.com/grpc-bazel-mirror/github.com/google/boringssl/archive/b9232f9e27e5668bc0414879dcdedb2a59ea75f2.tar.gz",
+            "https://github.com/google/boringssl/archive/b9232f9e27e5668bc0414879dcdedb2a59ea75f2.tar.gz",
+        ],
+    )
+
+    maybe(
         name = "com_github_grpc_grpc",
         repo_rule = http_archive,
         patch_args = ["-p1"],
         patches = [
             "@enkit//bazel/dependencies/grpc:no_remote_tag.patch",
+            "@enkit//bazel/dependencies/grpc:use_hermetic_py_headers.patch",
         ],
         sha256 = "e18b16f7976aab9a36c14c38180f042bb0fd196b75c9fd6a20a2b5f934876ad6",
         strip_prefix = "grpc-1.45.2",
