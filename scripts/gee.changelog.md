@@ -2,6 +2,35 @@
 
 ## Releases
 
+### 0.2.60
+
+* `gee pr_check`: Allow the user to specify a PR number, or infer the PR number from
+  the name of pr_NNN branches.
+* `gee pr_push`: Add a `--force` option.
+
+### 0.2.59
+
+* `gee hello`: disable the github token scope checks (#1210).  A more robust
+  implementation is needed.
+
+### 0.2.58
+
+* `gee update`: Fixed bug where gee incorrectly thinks a rebase is still in progress,
+  and enters an infinite loop.
+
+### 0.2.57
+
+* `gee pr_cancel`: Add missing `--region us-west1` flag to all gcloud commands.
+
+### 0.2.56
+
+* `gee lsbr`: fix bug in traversing upstream branches.
+
+### 0.2.55
+
+* `gee hello`: diagnose missing github API token scopes.
+* `gee update`: fix fetching of commits from other user's PRs.
+
 ### 0.2.54
 
 * `gee pr_checkout`: add "-n" flag to explicitly specify a branch name.

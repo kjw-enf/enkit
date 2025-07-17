@@ -145,8 +145,8 @@ would copy out 'tester.cc', 'processor.cc', 'my-library.h' instead of the genera
 """
 
 load("@bazel_skylib//lib:shell.bzl", "shell")
-load("//bazel/utils:messaging.bzl", "location", "package")
 load("//bazel/utils:merge_kwargs.bzl", "merge_kwargs")
+load("//bazel/utils:messaging.bzl", "location", "package")
 
 RemoteWrapper = provider(
     doc = "Optional provider a wrapper can return to supply parameters for remote_run",
@@ -160,12 +160,30 @@ directory that a wrapper requires by default to be used.
     },
 )
 
+SuiteTests = provider(
+    doc = "Represents the tests in a test suite - generally provider by the suite_aspect",
+    fields = {
+        "tests": "List of tests in the suite",
+    },
+)
+
+def _suite_aspect(target, ctx):
+    if ctx.rule.kind == "test_suite":
+        return [SuiteTests(tests = ctx.rule.attr.tests)]
+    return []
+
+suite_aspect = aspect(
+    doc = """Detects whether a target is a test suite.""",
+    implementation = _suite_aspect,
+    attr_aspects = [],
+)
+
 InputFiles = provider(
     doc = "Represents the input files of a rule - generally provider by the inputs_aspect",
     fields = {
         "direct": "List of all the direct input files of a rule",
         "all": "List of all the input files of a rule and its dependencies",
-    }
+    },
 )
 
 def _inputs_aspect(target, ctx):
@@ -181,6 +199,7 @@ def _inputs_aspect(target, ctx):
     files = ctx.rule.files
     for attr in dir(files):
         locfiles = getattr(files, attr, [])
+
         # ctx.rule.files by  contract is a struct, with each attribute
         # being a list, except for to_json and to_proto. Skip the two methods.
         # Anything else that's not iterable will cause a crash.
@@ -345,38 +364,43 @@ def _export_and_run_impl(ctx):
         fail(location(ctx) + "A target must be supplied via flags - check '//" + ctx.build_file_path + "' for details")
 
     tdi = None
+    env = {}
     if ctx.attr.target and package(ctx.attr.target.label) != package(attrs.noop.label):
         if input_files:
             fail(location(ctx) + "Either a target or inputs must be supplied via flags - not both! Check '//" + ctx.build_file_path + "' for details")
 
         tdi = ctx.attr.target[DefaultInfo]
         target_label = ctx.attr.target.label
+        if SuiteTests in ctx.attr.target:
+            fail("{} is a test suite.  It expands to the following tests: {}.  Use one of these targets instead.".format(target_label, ", ".join([str(t) for t in ctx.attr.target[SuiteTests].tests])))
         input_files = tdi.files.to_list()
+        if RunEnvironmentInfo in ctx.attr.target:
+            env = ctx.attr.target[RunEnvironmentInfo].environment
 
     runfiles = ctx.runfiles()
     target_opts = attrs.target_opts
     target_exec = ""
     if hasattr(tdi, "files_to_run") and hasattr(tdi.files_to_run, "executable") and tdi.files_to_run.executable:
-      no_execute = False
-      target_exec = tdi.files_to_run.executable.short_path
-      target_runfiles = tdi.default_runfiles
+        no_execute = False
+        target_exec = tdi.files_to_run.executable.short_path
+        target_runfiles = tdi.default_runfiles
 
-      runfiles = runfiles.merge(ctx.runfiles(files = [tdi.files_to_run.executable]))
-      runfiles = runfiles.merge(target_runfiles)
-      if attrs.alldeps:
-          runfiles = runfiles.merge(ctx.runfiles(files = input_files))
+        runfiles = runfiles.merge(ctx.runfiles(files = [tdi.files_to_run.executable]))
+        runfiles = runfiles.merge(target_runfiles)
+        if attrs.alldeps:
+            runfiles = runfiles.merge(ctx.runfiles(files = input_files))
 
-      if has_wrapper:
-          wrapper_exec = ctx.attr.wrapper[DefaultInfo].files_to_run.executable
-          wrapper_runfiles = ctx.attr.wrapper[DefaultInfo].default_runfiles
-          runfiles = runfiles.merge(wrapper_runfiles)
-          runfiles = runfiles.merge(ctx.runfiles(files = [wrapper_exec]))
+        if has_wrapper:
+            wrapper_exec = ctx.attr.wrapper[DefaultInfo].files_to_run.executable
+            wrapper_runfiles = ctx.attr.wrapper[DefaultInfo].default_runfiles
+            runfiles = runfiles.merge(wrapper_runfiles)
+            runfiles = runfiles.merge(ctx.runfiles(files = [wrapper_exec]))
 
-          target_opts = attrs.wrapper_opts + ["--", target_exec] + target_opts
-          target_exec = wrapper_exec.short_path
+            target_opts = attrs.wrapper_opts + ["--", target_exec] + target_opts
+            target_exec = wrapper_exec.short_path
     else:
-      no_execute = True
-      runfiles = runfiles.merge(ctx.runfiles(files = input_files))
+        no_execute = True
+        runfiles = runfiles.merge(ctx.runfiles(files = input_files))
 
     include = ctx.outputs.include
     ctx.actions.write(include, "\n".join([ctx.workspace_name + "/" + f.short_path for f in runfiles.files.to_list()]))
@@ -387,6 +411,7 @@ def _export_and_run_impl(ctx):
         target = shell.quote(package(target_label)),
         target_opts = shell.array_literal(target_opts),
         executable = shell.quote(target_exec),
+        env = " ".join(["{}={}".format(e, env[e]) for e in env]),
         no_execute = (no_execute and "true") or "",
         workspace = shell.quote(ctx.workspace_name),
         rsync_opts = shell.array_literal(attrs.rsync_opts),
@@ -422,6 +447,7 @@ export_and_run_rule = rule(
         "target": attr.label(
             cfg = "target",
             doc = "Target to execute on the remote machine",
+            aspects = [suite_aspect],
         ),
         "inputs": attr.label(
             doc = "Target whose input files need copied or exported - only one of target = or inputs = is allowed",

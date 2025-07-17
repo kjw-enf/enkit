@@ -27,16 +27,16 @@ func testWorkspace(t *testing.T) *Workspace {
 
 func mustNewTarget(t *testing.T, target *bpb.Target) *Target {
 	t.Helper()
-	newTarget, err := NewTarget(testWorkspace(t), target)
+	newTarget, err := NewTarget(testWorkspace(t), target, nil)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create target: %v", err))
 	}
 	return newTarget
 }
 
-func mustNewPseudoTarget(t *testing.T, target *bpb.Target, events map[string][]*bpb.WorkspaceEvent) *Target {
+func mustNewPseudoTarget(t *testing.T, target *bpb.Target, events *WorkspaceEvents) *Target {
 	t.Helper()
-	newT, err := NewExternalPseudoTarget(target, events)
+	newT, err := NewExternalPseudoTarget(testWorkspace(t), target, events)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create target: %v", err))
 	}
@@ -125,6 +125,62 @@ func TestCalculateAffected(t *testing.T) {
 				"//test/target:foo",
 				"//test/target:foo.txt",
 			},
+		},
+		{
+			desc: "dependency cycle",
+			startResults: &QueryResult{
+				Targets: map[string]*Target{
+					"//test/target:foo": mustNewTarget(t, &bpb.Target{
+						Type: bpb.Target_RULE.Enum(),
+						Rule: &bpb.Rule{
+							Name: proto.String("//test/target:foo"),
+							RuleInput: []string{
+								"//test/target:bar",
+							},
+						},
+					}),
+					"//test/target:bar": mustNewTarget(t, &bpb.Target{
+						Type: bpb.Target_RULE.Enum(),
+						Rule: &bpb.Rule{
+							Name: proto.String("//test/target:bar"),
+							RuleInput: []string{
+								"//test/target:foo.txt",
+							},
+						},
+					}),
+					"//test/target:foo.txt": mustNewTarget(t, &bpb.Target{
+						Type: bpb.Target_SOURCE_FILE.Enum(),
+						SourceFile: &bpb.SourceFile{
+							Name: proto.String("//test/target:foo.txt"),
+						},
+					}),
+				},
+				workspace: testWorkspace(t),
+			},
+			endResults: &QueryResult{
+				Targets: map[string]*Target{
+					"//test/target:foo": mustNewTarget(t, &bpb.Target{
+						Type: bpb.Target_RULE.Enum(),
+						Rule: &bpb.Rule{
+							Name: proto.String("//test/target:foo"),
+							RuleInput: []string{
+								"//test/target:bar",
+							},
+						},
+					}),
+					"//test/target:bar": mustNewTarget(t, &bpb.Target{
+						Type: bpb.Target_RULE.Enum(),
+						Rule: &bpb.Rule{
+							Name: proto.String("//test/target:bar"),
+							RuleInput: []string{
+								"//test/target:foo",
+							},
+						},
+					}),
+				},
+				workspace: testWorkspace(t),
+			},
+			wantErr: "dependency cycle",
 		},
 		{
 			desc: "attribute change detection",
@@ -607,10 +663,10 @@ func TestCalculateAffected(t *testing.T) {
 						SourceFile: &bpb.SourceFile{
 							Name: proto.String("@third_party_dep//:some_file.txt"),
 						},
-					}, map[string][]*bpb.WorkspaceEvent{
-						"//external:third_party_dep": {
+					}, testWorkspace(t).ConstructWorkspaceEvents(map[string][]*bpb.WorkspaceEvent{
+						"third_party_dep": {
 							{
-								Rule: "//external:third_party_dep",
+								Context: "repository @@third_party_dep",
 								Event: &bpb.WorkspaceEvent_DownloadEvent{
 									DownloadEvent: &bpb.DownloadEvent{
 										Url:    []string{"https://example.com/some/url"},
@@ -619,7 +675,7 @@ func TestCalculateAffected(t *testing.T) {
 								},
 							},
 						},
-					}),
+					})),
 				},
 				workspace: testWorkspace(t),
 			},
@@ -630,10 +686,10 @@ func TestCalculateAffected(t *testing.T) {
 						SourceFile: &bpb.SourceFile{
 							Name: proto.String("@third_party_dep//:some_file.txt"),
 						},
-					}, map[string][]*bpb.WorkspaceEvent{
-						"//external:third_party_dep": {
+					}, testWorkspace(t).ConstructWorkspaceEvents(map[string][]*bpb.WorkspaceEvent{
+						"third_party_dep": {
 							{
-								Rule: "//external:third_party_dep",
+								Context: "repository @@third_party_dep",
 								Event: &bpb.WorkspaceEvent_DownloadEvent{
 									DownloadEvent: &bpb.DownloadEvent{
 										Url:    []string{"https://example.com/some/url"},
@@ -642,7 +698,7 @@ func TestCalculateAffected(t *testing.T) {
 								},
 							},
 						},
-					}),
+					})),
 				},
 				workspace: testWorkspace(t),
 			},

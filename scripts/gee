@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # shellcheck disable=SC2034
 # (due to https://github.com/koalaman/shellcheck/issues/817)
 
-readonly VERSION="0.2.54"
+readonly VERSION="0.2.60"
 
 if read -r -d '' USAGE <<'EOT'
 . __ _  ___  ___
@@ -851,15 +851,32 @@ function _gh_auth_check() {
   # Wrap gh auth check and return correct exit codes on failure,
   # to work around https://github.com/cli/cli/issues/8845
   local -a RESULT=()
+  # Check gh auth status:
   if _read_cmd RESULT "${GH}" auth status; then
     if [[ "${RESULT[1]}" =~ Failed ]]; then
+      _error "gh auth status command failed.  Do you have a valid github API token?"
       return 1
-    else
-      return 0
     fi
   else
     return 1
   fi
+  ### TODO(jonathan): the following breaks with 2023 version of gh.  Find a way
+  ###    to fail functional.
+  ### # Check if we have the right token scopes:
+  ### local SCOPES=""
+  ### SCOPES="$("${GH}" api --verbose / | grep X-Oauth-Scopes: )"
+  ### MISSING=""
+  ### for S in "read:org" "repo" "admin:public_key" "admin:ssh_signing_key"; do
+  ###   if ! [[ "${SCOPES}" == *"${S}"* ]]; then
+  ###     MISSING+=" ${S}"
+  ###   fi
+  ### done
+  ### if [[ -n "${MISSING}" ]]; then
+  ###   _error "Your github API token is missing the following permissions: ${MISSING}"
+  ###   return 1
+  ### fi
+  ### _info "All github API permissions present."
+  return 0
 }
 
 function _gh_authenticate() {
@@ -883,6 +900,7 @@ function _gh_authenticate() {
       "   * \"repo\" (enables the whole sub-tree of permissions)" \
       "   * \"read:org\" (below the \"admin:org\" permission tree)" \
       "   * \"admin:public_key\" (enables the whole sub-tree of permissions)" \
+      "   * \"admin:ssh_signing_key\"" \
       "6. Finally, click \"Generate token\" at the bottom of the form." \
       ""
     local TOKEN=""
@@ -1222,6 +1240,17 @@ function _warn() {
   printf >&2 "${_COLOR_WARN}WARNING: %s${_COLOR_RST}\n" "$@"
 }
 
+# Report an error but don't die.
+function _error() {
+  local COLS LINE LEN BLANK
+  printf "  error: %s\n" "$@" | _to_gee_log
+  COLS="$(safe_tput cols)"
+  for LINE in "$@"; do
+    LEN="$( printf "%s\n" "$@" | wc -L )"
+    BLANK="$(head -c "$(( COLS - LEN - 8 ))" /dev/zero | tr '\0' ' ')"
+    printf >&2 "${_COLOR_DIE}ERROR: %s%s${_COLOR_RST}\n" "${LINE}" "${BLANK}"
+  done
+}
 # Use _fatal for user errors that don't require a stack dump.
 # "The user is going to be sad when they see this."
 function _fatal() {
@@ -1390,17 +1419,17 @@ function _git_rev_list_counts() {
   local P="$2"
 
   if [[ "${B}" == upstream/refs/pull/*/head ]]; then
-    "${GIT}" fetch --quiet upstream "${B#upstream/refs/}:FETCH_HEAD_B" >/dev/null 2>&1
+    "${GIT}" fetch --quiet --force upstream "${B#upstream/refs/}:FETCH_HEAD_B" >/dev/null 2>&1
     B=FETCH_HEAD_B
   elif [[ "${B}" == */* ]]; then
-    "${GIT}" fetch --quiet "${B%%/*}" "${B#upstream}:FETCH_HEAD_B" >/dev/null 2>&1
+    "${GIT}" fetch --quiet --force "${B%%/*}" "${B#upstream/}:FETCH_HEAD_B" >/dev/null 2>&1
     B=FETCH_HEAD_B
   fi
   if [[ "${P}" == upstream/refs/pull/*/head ]]; then
-    "${GIT}" fetch --quiet upstream "${P#upstream/refs/}:FETCH_HEAD_P" >/dev/null 2>&1
+    "${GIT}" fetch --quiet --force upstream "${P#upstream/refs/}:FETCH_HEAD_P" >/dev/null 2>&1
     P=FETCH_HEAD_P
   elif [[ "${P}" == */* ]]; then
-    "${GIT}" fetch --quiet "${P%%/*}" "${P#upstream}:FETCH_HEAD_P" >/dev/null 2>&1
+    "${GIT}" fetch --quiet --force "${P%%/*}" "${P#upstream/}:FETCH_HEAD_P" >/dev/null 2>&1
     P=FETCH_HEAD_P
   fi
   "${GIT}" rev-list --left-right --count "${B}...${P}" || /bin/true
@@ -1465,10 +1494,10 @@ function _branch_ahead_behind() {
   fi
   local -a counts
   read -r -a counts < <(_git_rev_list_counts "${branch}" "${obr}") || /bin/true
-  if (( "${counts[0]}" == 0 )) && (( "${counts[1]}" == 0 )); then
+  if [[ "${counts[0]}" == "0" ]] && [[ "${counts[1]}" == "0" ]]; then
     printf "%-20s: same as %s" "${branch}" "${obr}"
   else
-    printf "%-20s: %s ahead, %s behind %s" "${branch}" "${counts[0]}" "${counts[1]}" "${obr}"
+    printf "%-20s: %q ahead, %q behind %s" "${branch}" "${counts[0]}" "${counts[1]}" "${obr}"
   fi
   if _remote_branch_exists origin "${branch}"; then
     counts=()
@@ -1586,7 +1615,7 @@ function _interactive_conflict_resolution() {
     SKIP=0
     RESTART=0
     if [[ "${#STATUS[@]}" -eq 0 ]]; then
-      _warn "Empty commit, skipping automatically."
+      _info "Empty commit, skipping automatically."
       SKIP=1
     fi
     for STATUS_LINE in "${STATUS[@]}"; do
@@ -1876,15 +1905,13 @@ function _safer_rebase() {
 }
 
 function _is_rebase_in_progress() {
-  local RC
-  NOFAIL=1 "${GIT}" rev-parse --verify REBASE_HEAD >/dev/null 2>/dev/null
-  RC=$?
-  if [[ "${RC}" == 0 ]]; then
-    return 0  # rebase is in progress
-  elif [[ "${RC}" == 128 ]]; then
-    return 1  # rebase is not in progress
+  # Is this branch currently in the middle of a rebase operation?
+  local G
+  G="$(git rev-parse --git-dir)"
+  if compgen -G "${G}/rebase*" > /dev/null; then
+    return 0  # 0=true
   else
-    _die "git rev-parse --verify REBASE_HEAD failed with unexpected code: ${RC}"
+    return 1  # 1=false
   fi
 }
 
@@ -2695,7 +2722,7 @@ function gee__diff() {
   PARENT_BRANCH="$(_get_parent_branch)"
   # branches created with "gee pr_checkout" need special handling:
   if [[ "${PARENT_BRANCH}" == upstream/* ]]; then
-    _git fetch upstream "${PARENT_BRANCH#upstream/}"
+    _git fetch --force upstream "${PARENT_BRANCH#upstream/}"
     PARENT_BRANCH="FETCH_HEAD"
   fi
   if (( "$#" )); then
@@ -3323,8 +3350,8 @@ function _get_parent_head_commit() {
   local -a WORDS=()
   if [[ "${PARENT}" == */* ]]; then
     # make sure remote is up to date:
-    _git fetch "${PARENT%%/*}"
-    READ_CMD_ECHO=1 _read_cmd OUTPUT "${GIT}" ls-remote "${PARENT%%/*}" "${PARENT#*/}"
+    _git fetch "${PARENT%%/*}" "${PARENT#*/}"
+    READ_CMD_ECHO=1 _read_cmd OUTPUT "${GIT}" show -s --format=oneline FETCH_HEAD
     read -r -a WORDS <<< "${OUTPUT[0]}"
     _PARENT_HEAD="${WORDS[0]}"
   else
@@ -3450,6 +3477,9 @@ function gee__lsbranches() {
   _set_main
   _git fetch
   for br in "${branches[@]}"; do
+    if [[ "${br}" == FETCH_HEAD* ]]; then
+      continue
+    fi
     if [[ "${br}" != "${MAIN}" ]]; then
       _branch_ahead_behind "${br}"
     fi
@@ -3493,7 +3523,7 @@ function gee__cleanup() {
       local parent
       parent="$(_get_parent_branch "${br}")"
       if [[ "${parent}" == upstream/* ]]; then
-        _git fetch upstream "${parent#upstream/}"
+        _git fetch --force upstream "${parent#upstream/}"
         parent="FETCH_HEAD"
       fi
       local -a  counts=()
@@ -3880,6 +3910,12 @@ Otherwise, the other user might accidentally lose your commits entirely if they
 force-push.  Remote users can integrate your changes using the `gee update`
 command, or `git rebase --autostash origin/<branch>` if they aren't a gee user.
 
+It is sometimes necessary to perform a force push to a remote user's branch
+(for example, after a rebase operation).  Use this with extreme caution,
+and coordinate directly with the PR owner before doing this.  Otherwise, you
+might accidentally destroy another user's work.  To enable force push,
+add `--force` to the `gee pr_push` command.
+
 See also:
 
 * commit
@@ -3903,15 +3939,24 @@ function gee__pr_push() {
   fi
   _info "This branch appears to be associated with PR #${PRNUM}."
 
+  local FORCE
+  FORCE=0
+  if [[ "$1" == "--force" ]]; then
+    FORCE=1
+    shift
+  fi
+
   # Identify remote branch
   local -a DATA=()
   _read_cmd DATA "${GH}" pr view "${PRNUM}" \
-    --json author,headRefName,state \
-    --jq '.author["login"],.headRefName,.state'
+    --json author,headRepository,headRepositoryOwner,headRefName,state \
+    --jq '.author["login"],.headRepository["name"],.headRepositoryOwner["login"],.headRefName,.state'
   local REMOTE_USER REMOTE_BRANCH REMOTE_STATE
   REMOTE_USER="${DATA[0]}"
-  REMOTE_BRANCH="${DATA[1]}"
-  REMOTE_STATE="${DATA[2]}"
+  REMOTE_REPO="${DATA[1]}"
+  REMOTE_REPO_OWNER="${DATA[2]}"
+  REMOTE_BRANCH="${DATA[3]}"
+  REMOTE_STATE="${DATA[4]}"
 
   # Check that the remote branch hasn't already been merged.
   if [[ "${REMOTE_STATE}" == "MERGED" ]]; then
@@ -3919,27 +3964,36 @@ function gee__pr_push() {
   fi
 
   # Fetch from remote branch.
-  if ! "${GIT}" remote get-url "${REMOTE_USER}" >/dev/null 2>&1; then
-    _git remote add "${REMOTE_USER}" "${GIT_AT_GITHUB}:${REMOTE_USER}/${REPO}.git" >&2
-  fi
-  _git fetch "${REMOTE_USER}" "${REMOTE_BRANCH}"
+  # We no longer need to add a new remote:
+  # if ! "${GIT}" remote get-url "${REMOTE_USER}" >/dev/null 2>&1; then
+  #   _git remote add "${REMOTE_USER}" "${GIT_AT_GITHUB}:${REMOTE_USER}/${REPO}.git" >&2
+  # fi
+  _git fetch --force "${GIT_AT_GITHUB}:${REMOTE_REPO_OWNER}/${REMOTE_REPO}" "${REMOTE_BRANCH}"
 
   # Check if we are behind remote branch
   local -a COUNTS
   read -r -a COUNTS < <("${GIT}" rev-list --left-right --count "${BRANCH}...FETCH_HEAD")
-  _info "Local has ${COUNTS[0]} more commit(s) than remote ${REMOTE_USER}/${REMOTE_BRANCH}."
+  _info "Local has ${COUNTS[0]} more commit(s) than remote ${REMOTE_REPO_OWNER}/${REMOTE_BRANCH}."
   _info "Remote has ${COUNTS[1]} more commit(s) than local."
   if [[ "${COUNTS[0]}" -eq 0 ]]; then
     _fatal "No local commits to push.  Perhaps you need to \"gee commit\" first?"
   fi
   if [[ "${COUNTS[1]}" -gt 0 ]]; then
-    _warn "Remote branch ${REMOTE_USER}/${REMOTE_BRANCH} is ${COUNTS[1]} commit(s) ahead of ${BRANCH}."
-    _fatal "You must run \"gee update\" and then try again."
+    _warn "Remote branch ${REMOTE_REPO_OWNER}/${REMOTE_BRANCH} is ${COUNTS[1]} commit(s) ahead of ${BRANCH}."
+    if [[ $FORCE == 1 ]]; then
+      _warn "Force is enabled."
+    else
+      _fatal "You must run \"gee update\" and then try again."
+    fi
   fi
 
   # Push our changes to the remote branch
-  _git push "${REMOTE_USER}" "HEAD:${REMOTE_BRANCH}"
-  _info "Successfully pushed to PR#${PRNUM} (${REMOTE_USER}/${REMOTE_BRANCH})."
+  local F=""
+  if [[ $FORCE == 1 ]]; then
+    F="-f"
+  fi
+  _git push $F "${GIT_AT_GITHUB}:${REMOTE_REPO_OWNER}/${REMOTE_REPO}" "HEAD:${REMOTE_BRANCH}"
+  _info "Successfully pushed to PR#${PRNUM} (${REMOTE_REPO_OWNER}/${REMOTE_BRANCH})."
 
   _warn "Please notify ${REMOTE_USER} that they should pull from their remote branch, " \
         "otherwise they might accidentally force-commit over your changes."
@@ -4474,9 +4528,10 @@ function gee__pr_cancel() {
   FILTER+=" AND (status=\"WORKING\" OR status=\"QUEUED\")"  # and by job status
   while read -r -a FIELDS; do
     local ID="${FIELDS[1]}"
-    _cmd gcloud --project "${GEE_BUILDLOGS_PROJECT}" builds cancel "${ID}" > /dev/null
+    _cmd gcloud --project "${GEE_BUILDLOGS_PROJECT}" builds cancel "${ID}" --region us-west1 > /dev/null
     COUNT=$((COUNT + 1))
   done < <(_cmd gcloud --project="${GEE_BUILDLOGS_PROJECT}" builds list \
+              --region us-west1 \
               --format=yaml \
               --filter="${FILTER}" \
               | grep ^id:)
@@ -4490,11 +4545,18 @@ function gee__pr_cancel() {
 _register_help "pr_check" \
   "Checks the status of presubmit tests for a PR." \
   "pr_checks" "check_pr" "check" "checks" <<'EOT'
-Usage: gee pr_check [--wait]
+Usage: gee pr_check [--wait] [<PR number>]
 
-Returns the state of presubmit checks.  If the --wait option is provided,
-this command will continue to report check status until all pending
-checks have completed.
+Returns the state of presubmit checks.  If the --wait option is provided, this
+command will continue to report check status until all pending checks have
+completed.  This command will also parse the console output of any failed
+presubmit check, looking for anything that looks like a buildbuddy link.
+
+gee performs a few tricks to infer the PR number if one is not provided by the
+user.  If a branch was created with `gee pr_checkout` (if the branch has a name
+like pr_12345), gee will infer the PR number from the branch name.  Otherwise,
+gee will invoke `gh pr view` to ask github for the PR number associated with
+the branch.
 EOT
 
 function _push_will_trigger_presubmit() {
@@ -4543,7 +4605,9 @@ function _parse_gh_pr_checks() {
     read -r -a FIELDS <<< "${LINE}"
     (( CHECK_COUNTS_REF["${FIELDS[2]}"]++ )) || /bin/true
     if [[ "${FIELDS[2]}" == "fail" ]]; then
-      if [[ "${FIELDS[4]}" =~ builds/([a-f0-9-]*)\?project ]]; then
+      if [[ "${FIELDS[4]}" =~ builds\;region=us-west1/([a-f0-9-]*)\?project ]]; then
+        FAILED_BUILDS_REF+=( "${BASH_REMATCH[1]}" )
+      elif [[ "${FIELDS[4]}" =~ builds/([a-f0-9-]*)\?project ]]; then
         FAILED_BUILDS_REF+=( "${BASH_REMATCH[1]}" )
       else
         _warn "Could not parse build number from URL: ${FIELDS[4]}"
@@ -4561,8 +4625,24 @@ function gee__pr_check() {
   _startup_checks "pr_check"
 
   local WAIT=0
-  if [[ " $* " == *" --wait "* ]]; then
-    WAIT=1
+  local PRNUM=0
+  local ARG
+  for ARG in "$@"; do
+    if [[ "${ARG}" == "--wait" ]]; then
+      WAIT=1
+    else
+      PRNUM="${ARG}"
+    fi
+  done
+
+  if [[ "${PRNUM}" == 0 ]]; then
+    local CURRENT_BRANCH
+    CURRENT_BRANCH="$(_get_current_branch)"
+    if [[ "${CURRENT_BRANCH}" == "pr_"* ]]; then
+      PRNUM="${CURRENT_BRANCH:3}"
+    else
+      PRNUM="$(gh pr view | grep number | awk '{print $2}'; exit "${PIPESTATUS[0]}")"
+    fi
   fi
 
   local PREV_CHECKS=""
@@ -4571,9 +4651,10 @@ function gee__pr_check() {
   local -a FAILED_BUILDS=()
   local PENDING=1
   local CHECKS_FAILED=0
-  printf >&2 "${_COLOR_CMD}CMD:%-${C}s${_COLOR_RST}\n" " ${GH} pr checks"  # show user what we're doing
+  local CMD
+  printf >&2 "${_COLOR_CMD}CMD:%-${C}s${_COLOR_RST}\n" " ${GH} pr checks ${PRNUM}"  # show user what we're doing
   while [[ "${PENDING}" -ne 0 ]]; do
-    if VERBOSE=0 DONT_WARN=1 GRAB_STDERR=1 _read_cmd CHECKS "${GH}" pr checks; then
+    if VERBOSE=0 DONT_WARN=1 GRAB_STDERR=1 _read_cmd CHECKS "${GH}" pr checks "${PRNUM}"; then
       printf "%s\n" "${CHECKS[@]}" | sed 's/(.*)//' | column -t >&2
       # no failures, nothing pending.
       _info "All checks successful."
@@ -4634,7 +4715,7 @@ function gee__pr_check() {
       local BUILD
       for BUILD in "${FAILED_BUILDS[@]}"; do
         _warn "Failed build: ${BUILD}"
-        gcloud --project="${GEE_BUILDLOGS_PROJECT}" builds log "${BUILD}" | grep -i -E "(failed:|error:|streaming build results to:)"
+        gcloud --project="${GEE_BUILDLOGS_PROJECT}" builds log "${BUILD}" --region us-west1  | grep -i -E "(failed:|error:|streaming build results to:)"
       done
     fi
   fi
@@ -6644,6 +6725,7 @@ function gee__colortest() {
   _debug "This is _debug"
   _info "This is _info"
   _warn "This is _warn"
+  _error "This is an _error"
   DRYRUN=1 _cmd run --a --command
   (_fatal "This is _fatal") || /bin/true
   (_die "This is _die") || /bin/true

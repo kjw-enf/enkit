@@ -1,4 +1,4 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "astore",
@@ -10,15 +10,17 @@ go_library(
         "note.go",
         "publish.go",
         "retrieve.go",
+        "token.go",
     ],
     importpath = "github.com/enfabrica/enkit/astore/server/astore",
     visibility = ["//visibility:public"],
     deps = [
-        "//astore/rpc/astore",
+        "//astore/rpc/astore:go_default_library",
         "//lib/kflags",
         "//lib/logger",
         "//lib/oauth",
         "//lib/retry",
+        "@com_github_golang_jwt_jwt_v5//:jwt",
         "@com_google_cloud_go_datastore//:datastore",
         "@com_google_cloud_go_storage//:storage",
         "@org_golang_google_api//iterator",
@@ -34,6 +36,7 @@ go_test(
     srcs = [
         "astore_test.go",
         "retrieve_test.go",
+        "token_test.go",
         "util_test.go",
     ],
     data = glob(["testdata/**"]),
@@ -41,12 +44,16 @@ go_test(
     local = True,
     deps = [
         "//astore/client/astore",
-        "//astore/rpc/astore",
+        "//astore/rpc/astore:go_default_library",
         "//lib/errdiff",
+        "//lib/logger",
         "//lib/testutil",
+        "@com_github_golang_jwt_jwt_v5//:jwt",
         "@com_github_golang_protobuf//ptypes/wrappers",
         "@com_github_prashantv_gostub//:gostub",
         "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//mock",
+        "@com_github_stretchr_testify//require",
         "@com_google_cloud_go_datastore//:datastore",
         "@com_google_cloud_go_storage//:storage",
         "@org_golang_google_genproto//googleapis/datastore/v1:datastore",

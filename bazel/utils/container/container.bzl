@@ -1,10 +1,9 @@
-load("//bazel/utils:files.bzl", "write_to_file")
-load("//bazel/dive:dive.bzl", "oci_dive")
-load("//bazel/utils:merge_kwargs.bzl", "add_tag")
 load("@enkit//bazel/utils:merge_kwargs.bzl", "merge_kwargs")
-load("@rules_oci//oci:defs.bzl", "oci_image", "oci_push", "oci_tarball")
 load("@enkit_pip_deps//:requirements.bzl", "requirement")
-load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("//bazel/dive:dive.bzl", "oci_dive")
+load("//bazel/utils:files.bzl", "write_to_file")
+load("//bazel/utils:merge_kwargs.bzl", "add_tag")
 
 GCP_REGION = "us-docker"
 GCP_PROJECT = "enfabrica-container-images"
@@ -242,7 +241,7 @@ def nonhermetic_image_builder_impl(ctx):
         staging_repo = ctx.file.staging_repo.short_path,
         prod_repo = ctx.file.prod_repo.short_path,
     ))
-    direct_files = ctx.files.src + ctx.files.labels + ctx.files.dev_repo + ctx.files.staging_repo + ctx.files.prod_repo
+    direct_files = ctx.files.src + ctx.files.labels + ctx.files.dev_repo + ctx.files.staging_repo + ctx.files.prod_repo + ctx.files.tars
     runfiles = ctx.runfiles(
         files = ctx.attr._tool[DefaultInfo].files.to_list() + direct_files,
         transitive_files = ctx.attr._tool[DefaultInfo].default_runfiles.files,
@@ -283,6 +282,10 @@ _nonhermetic_image_builder = rule(
             default = "//bazel/utils/container/muk:muk",
             executable = True,
             cfg = "exec",
+        ),
+        "tars": attr.label_list(
+            doc = "List of tarballs to extract into the environment",
+            allow_files = [".tar", ".tar.gz"],
         ),
     },
     executable = True,
@@ -347,13 +350,6 @@ def container_image(*args, **kwargs):
     output = "{}_labels.txt".format(name)
     tags = kwargs.get("tags", [])
 
-    # The 'image' field in oci_pull does not need the //image target
-    # while the container_pull rule does. Modify this wrapper script
-    # to insert the //image target when using container_pull.
-    # Remove once oci_pull doesn't have auth errors anymore.
-    if kwargs.get("base", "").startswith("@"):
-        kwargs["base"] = "{}//image".format(kwargs.get("base"))
-
     # Always include user-defined container labels in addition to build metadata from bazel --stamp
     # https://bazel.build/docs/user-manual#workspace-status
     # Container labels for oci_image can be a dictionary or file of key-value pairs with '=' as delimiters
@@ -377,7 +373,7 @@ def container_image(*args, **kwargs):
     oci_image(*args, **kwargs)
 
 def container_tarball(*args, **kwargs):
-    oci_tarball(*args, **kwargs)
+    oci_load(*args, **kwargs)
 
 def container_push(*args, **kwargs):
     # TODO: This forces targets to be `manual`, since the base images they
@@ -397,6 +393,7 @@ def container_push(*args, **kwargs):
     project = kwargs.get("project", GCP_PROJECT)
     image_path = kwargs.get("image_path")
     tags = kwargs.get("tags", [])
+    visibility = kwargs.get("visibility", [])
 
     for repo in ["dev", "staging"]:
         container_repo(
@@ -416,11 +413,16 @@ def container_push(*args, **kwargs):
             tags = tags,
         )
     local_image_path = "{}/{}:latest".format(native.package_name(), target_basename)
-    oci_tarball(
-        name = "{}_tarball".format(target_basename),
+    oci_load(
+        name = "{}_load".format(target_basename),
         image = kwargs.get("image"),
         repo_tags = [local_image_path],
         tags = tags,
+    )
+    native.filegroup(
+        name = "{}_tarball".format(target_basename),
+        srcs = [":{}_load".format(target_basename)],
+        output_group = "tarball",
     )
     container_pusher(
         name = target_basename,
@@ -430,11 +432,13 @@ def container_push(*args, **kwargs):
         namespace = namespace,
         image_path = image_path,
         tags = tags,
+        visibility = visibility,
     )
 
 def container_pusher_impl(ctx):
     script = ctx.actions.declare_file("{}_push_script.sh".format(ctx.attr.name))
     body = """#!/bin/bash
+export RUNFILES_DIR="$(pwd)/external"
 {} \\
 --dev_script {} \\
 --staging_script {} \\
@@ -461,7 +465,8 @@ $@
     transitive_files = ctx.attr._tool[DefaultInfo].default_runfiles.files.to_list() + \
                        ctx.attr.dev_script[DefaultInfo].default_runfiles.files.to_list() + \
                        ctx.attr.staging_script[DefaultInfo].default_runfiles.files.to_list() + \
-                       ctx.attr.image_tarball[DefaultInfo].default_runfiles.files.to_list()
+                       ctx.attr.image_tarball[DefaultInfo].default_runfiles.files.to_list() + \
+                       ctx.attr._bash_runfiles[DefaultInfo].files.to_list()
     runfiles = ctx.runfiles(
         files = ctx.attr._tool[DefaultInfo].files.to_list() + direct_files,
         transitive_files = depset(transitive_files),
@@ -488,7 +493,7 @@ container_pusher = rule(
             mandatory = True,
         ),
         "image_tarball": attr.label(
-            doc = "Image tarball returned by the oci_tarball rule to validate image tags",
+            doc = "Image tarball returned by the oci_load rule to validate image tags",
             allow_single_file = [".tar"],
             mandatory = True,
         ),
@@ -507,6 +512,10 @@ container_pusher = rule(
         "region": attr.string(
             doc = "GCP region name",
             default = GCP_REGION,
+        ),
+        "_bash_runfiles": attr.label(
+            doc = "Bash runfiles lib",
+            default = "@bazel_tools//tools/bash/runfiles:runfiles",
         ),
         "_tool": attr.label(
             doc = "Container pusher binary",

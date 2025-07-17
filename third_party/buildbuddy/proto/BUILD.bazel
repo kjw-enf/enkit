@@ -1,6 +1,6 @@
+load("@protobuf//bazel:py_proto_library.bzl", "py_proto_library")
+load("@rules_go//proto:def.bzl", "go_proto_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
-load("@rules_proto_grpc//python:defs.bzl", "py_proto_library")
-load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
 
 # Keep gazelle from generating a go_library that includes the dummy source
 # (empty.go)
@@ -16,9 +16,19 @@ proto_library(
     ],
 )
 
+py_proto_library(
+    name = "acl_py_proto",
+    deps = [":acl_proto"],
+)
+
 proto_library(
     name = "cache_proto",
     srcs = ["cache.proto"],
+)
+
+py_proto_library(
+    name = "cache_py_proto",
+    deps = [":cache_proto"],
 )
 
 proto_library(
@@ -27,6 +37,11 @@ proto_library(
     deps = [
         ":user_id_proto",
     ],
+)
+
+py_proto_library(
+    name = "context_py_proto",
+    deps = [":context_proto"],
 )
 
 proto_library(
@@ -38,13 +53,43 @@ proto_library(
         ":context_proto",
         "//third_party/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto:build_event_stream_proto",
         "//third_party/bazel/src/main/protobuf:command_line_proto",
-        "@com_google_protobuf//:timestamp_proto",
+        "@protobuf//:timestamp_proto",
     ],
+)
+
+py_proto_library(
+    name = "invocation_py_proto",
+    deps = [":invocation_proto"],
 )
 
 proto_library(
     name = "user_id_proto",
     srcs = ["user_id.proto"],
+)
+
+py_proto_library(
+    name = "user_id_py_proto",
+    deps = [":user_id_proto"],
+)
+
+proto_library(
+    name = "buildbuddy_proto",
+    deps = [
+        ":acl_proto",
+        ":cache_proto",
+        ":context_proto",
+        ":invocation_proto",
+        ":user_id_proto",
+        "//third_party/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto:build_event_stream_proto",
+        "//third_party/bazel/src/main/protobuf:command_line_proto",
+    ],
+)
+
+py_proto_library(
+    name = "buildbuddy_py_proto",
+    deps = [
+        ":buildbuddy_proto",
+    ],
 )
 
 # Go proto rules below here
@@ -63,44 +108,4 @@ go_proto_library(
         "//third_party/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto:build_event_stream_go_proto",
         "//third_party/bazel/src/main/protobuf:proto",
     ],
-)
-
-# Python proto rules below here
-
-py_proto_library(
-    name = "acl_py_proto",
-    protos = [":acl_proto"],
-    deps = [
-        ":user_id_py_proto",
-    ],
-)
-
-py_proto_library(
-    name = "context_py_proto",
-    protos = [":context_proto"],
-    deps = [
-        ":user_id_py_proto",
-    ],
-)
-
-py_proto_library(
-    name = "cache_py_proto",
-    protos = [":cache_proto"],
-)
-
-py_proto_library(
-    name = "invocation_py_proto",
-    protos = [":invocation_proto"],
-    deps = [
-        ":acl_py_proto",
-        ":cache_py_proto",
-        ":context_py_proto",
-        "//third_party/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto:build_event_stream_py_proto",
-        "//third_party/bazel/src/main/protobuf:command_line_py_proto",
-    ],
-)
-
-py_proto_library(
-    name = "user_id_py_proto",
-    protos = [":user_id_proto"],
 )

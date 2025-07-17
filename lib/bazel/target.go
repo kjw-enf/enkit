@@ -5,6 +5,8 @@ import (
 	"hash"
 	"hash/fnv"
 	"io"
+	"io/fs"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strconv"
@@ -42,9 +44,7 @@ type Target struct {
 
 type TargetHashes map[string]uint32
 
-// Creates a Target object that holds computations based on the supplied target
-// proto message.
-func NewTarget(w *Workspace, t *bpb.Target) (*Target, error) {
+func ConstructTarget(w *Workspace, t *bpb.Target) (*Target, error) {
 	shallow, err := shallowHash(w, t)
 	if err != nil {
 		return nil, err
@@ -59,12 +59,32 @@ func NewTarget(w *Workspace, t *bpb.Target) (*Target, error) {
 	}, nil
 }
 
+// Creates a Target object that holds computations based on the supplied target
+// proto message.
+func NewTarget(w *Workspace, t *bpb.Target, workspaceEvents *WorkspaceEvents) (*Target, error) {
+	lbl, err := labelFromString(extractName(t))
+	if err != nil {
+		return nil, err
+	}
+	if lbl.isExternal() {
+		newTarget, err := NewExternalPseudoTarget(w, t, workspaceEvents)
+		if err != nil {
+			return nil, err
+		}
+		if newTarget != nil {
+			return newTarget, nil
+		}
+	}
+
+	return ConstructTarget(w, t)
+}
+
 // Creates a Target object from the supplied proto message that represents an
 // external target. This target only has attributes based on the hashes used
 // during download of the external repository, to save time on hashing
 // third-party files that are unlikely to change often. These hashes are fetched
 // from the supplied set of workspace events.
-func NewExternalPseudoTarget(t *bpb.Target, eventMap map[string][]*bpb.WorkspaceEvent) (*Target, error) {
+func NewExternalPseudoTarget(w *Workspace, t *bpb.Target, workspaceEvents *WorkspaceEvents) (*Target, error) {
 	nameCopy := extractName(t)
 	lbl, err := labelFromString(nameCopy)
 	if err != nil {
@@ -74,8 +94,12 @@ func NewExternalPseudoTarget(t *bpb.Target, eventMap map[string][]*bpb.Workspace
 		return nil, fmt.Errorf("target %q is not external", nameCopy)
 	}
 
-	lbl = lbl.toCoarseExternal()
-	events := eventMap[lbl.String()]
+	workspaceName := lbl.WorkspaceName()
+	hash, hashExist := workspaceEvents.WorkspaceHashes[workspaceName]
+	if !hashExist {
+		return nil, nil
+	}
+	hashStr := fmt.Sprintf("%d", hash)
 
 	newTarget := &bpb.Target{
 		Type: bpb.Target_RULE.Enum(),
@@ -84,14 +108,15 @@ func NewExternalPseudoTarget(t *bpb.Target, eventMap map[string][]*bpb.Workspace
 			RuleInput: extractDepNames(t),
 			Attribute: []*bpb.Attribute{
 				{
-					Name:            &pseudoTargetAttributeName,
-					Type:            bpb.Attribute_STRING_LIST.Enum(),
-					StringListValue: extractChecksums(events),
+					Name:        &pseudoTargetAttributeName,
+					Type:        bpb.Attribute_STRING.Enum(),
+					StringValue: &hashStr,
 				},
 			},
 		},
 	}
-	return NewTarget(nil, newTarget)
+
+	return ConstructTarget(w, newTarget)
 }
 
 // Calculates a hash based on the attributes of this target only, including
@@ -120,11 +145,27 @@ func shallowHash(w *Workspace, t *bpb.Target) (uint32, error) {
 		}
 		f, err := w.OpenSource(lbl.filePath())
 		if err != nil {
-			return 0, fmt.Errorf("can't open source file %q: %w", lbl.filePath(), err)
+			err = fmt.Errorf("can't open source file %q: %w", lbl.filePath(), err)
+			if lbl.isExternal() {
+				slog.Debug("%s", err)
+				err = nil
+			} else {
+				return 0, err
+			}
 		}
-		defer f.Close()
-
-		err = hashFile(h, f)
+		if f != nil {
+			defer f.Close()
+			if lbl.isExternal() {
+				// External files change rarely, so just size calculation is enough
+				var fileInfo fs.FileInfo
+				fileInfo, err = f.Stat()
+				if fileInfo != nil {
+					fmt.Fprintf(h, "%d", fileInfo.Size())
+				}
+			} else {
+				err = hashFile(h, f)
+			}
+		}
 		if err != nil {
 			// TODO(scott): After moving to go 1.17, replace this error
 			// introspection with a call to Stat before Open (requires os.DirFS to
@@ -148,7 +189,8 @@ func shallowHash(w *Workspace, t *bpb.Target) (uint32, error) {
 		// No need to do anything more here.
 
 	case bpb.Target_PACKAGE_GROUP:
-		return 0, fmt.Errorf("PACKAGE_GROUP hashing not implemented")
+		// `package_group` rules only control visibility, nothing to hash here, just skip.
+
 	case bpb.Target_ENVIRONMENT_GROUP:
 		return 0, fmt.Errorf("ENVIRONMENT_GROUP hashing not implemented")
 	}
@@ -236,40 +278,39 @@ func extractDepNames(t *bpb.Target) []string {
 	return nil
 }
 
-// extractChecksums returns a sorted list of download hashes from a set of
-// relevant workspace events.
-func extractChecksums(events []*bpb.WorkspaceEvent) []string {
-	var checksums []string
-	for _, event := range events {
-		switch e := event.GetEvent().(type) {
-		case *bpb.WorkspaceEvent_DownloadEvent:
-			if e.DownloadEvent.GetSha256() != "" {
-				checksums = append(checksums, e.DownloadEvent.GetSha256())
-			}
-			if e.DownloadEvent.GetIntegrity() != "" {
-				checksums = append(checksums, e.DownloadEvent.GetIntegrity())
-			}
-		case *bpb.WorkspaceEvent_DownloadAndExtractEvent:
-			if e.DownloadAndExtractEvent.GetSha256() != "" {
-				checksums = append(checksums, e.DownloadAndExtractEvent.GetSha256())
-			}
-			if e.DownloadAndExtractEvent.GetIntegrity() != "" {
-				checksums = append(checksums, e.DownloadAndExtractEvent.GetIntegrity())
-			}
-		case *bpb.WorkspaceEvent_ExecuteEvent:
-			if len(e.ExecuteEvent.GetArguments()) == 2 && e.ExecuteEvent.GetArguments()[0] == "echo" {
-				fmt.Printf("got checksum: %q\n", e.ExecuteEvent.GetArguments()[1])
-				checksums = append(checksums, e.ExecuteEvent.GetArguments()[1])
-			}
-		}
-	}
-	sort.Strings(checksums)
-	return checksums
-}
-
 func (t *Target) containsTag(tag string) bool {
 	_, ok := t.tags[tag]
 	return ok
+}
+
+func (t *Target) getHashInteral(w *Workspace, chain *map[string]struct{}) (uint32, error) {
+	if t.hash != nil {
+		return *t.hash, nil
+	}
+
+	_, cycle := (*chain)[t.Name()]
+	if cycle {
+		return 0, fmt.Errorf("dependency cycle detected involving %s", t.Name())
+	}
+	(*chain)[t.Name()] = struct{}{}
+
+	h := fnv.New32()
+
+	for _, dep := range t.deps {
+		hash, err := dep.getHashInteral(w, chain)
+		if err != nil {
+			return 0, err
+		} else {
+			fmt.Fprintf(h, "%d", hash)
+		}
+	}
+
+	fmt.Fprintf(h, "%d", t.shallowHash)
+
+	hash := h.Sum32()
+	t.hash = &hash
+	delete(*chain, t.Name())
+	return hash, nil
 }
 
 // getHash returns the computed hash from this target, recursively evaluating
@@ -283,26 +324,8 @@ func (t *Target) containsTag(tag string) bool {
 //     of t.deps changes)
 //   - The Starlark code of the producing rule changes
 func (t *Target) getHash(w *Workspace) (uint32, error) {
-	if t.hash != nil {
-		return *t.hash, nil
-	}
-
-	h := fnv.New32()
-
-	for _, dep := range t.deps {
-		hash, err := dep.getHash(w)
-		if err != nil {
-			// TODO(scott): Log this condition
-		} else {
-			fmt.Fprintf(h, "%d", hash)
-		}
-	}
-
-	fmt.Fprintf(h, "%d", t.shallowHash)
-
-	hash := h.Sum32()
-	t.hash = &hash
-	return hash, nil
+	chain := map[string]struct{}{}
+	return t.getHashInteral(w, &chain)
 }
 
 // hashFile adds the contents of a file at path `path` to the provided

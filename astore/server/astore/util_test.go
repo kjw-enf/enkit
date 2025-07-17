@@ -2,12 +2,18 @@ package astore
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"fmt"
 	"testing"
 
 	"cloud.google.com/go/datastore"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/golang/protobuf/ptypes/wrappers"
+	"github.com/stretchr/testify/require"
 	dpb "google.golang.org/genproto/googleapis/datastore/v1"
+
+	"github.com/enfabrica/enkit/lib/logger"
 )
 
 // testDatastore is a mock Datastore object that captures queries made.
@@ -92,7 +98,7 @@ func serverForTest() (*Server, *testDatastore) {
 		gcs:     nil,
 		bkt:     nil,
 		ds:      ds,
-		options: Options{},
+		options: Options{logger: logger.Nil},
 	}, ds
 }
 
@@ -191,10 +197,24 @@ func int32Val(i int32) *wrappers.Int32Value {
 
 func kindArtifact() []*dpb.KindExpression {
 	return []*dpb.KindExpression{
-		&dpb.KindExpression{
+		{
 			Name: "Artifact",
 		},
 	}
+}
+
+func generateTokenKeypair(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	return k
+}
+
+func createToken(t *testing.T, key *rsa.PrivateKey, claims jwt.Claims) string {
+	t.Helper()
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(key)
+	require.NoError(t, err)
+	return signed
 }
 
 const (

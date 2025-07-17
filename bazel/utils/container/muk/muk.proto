@@ -114,12 +114,30 @@ message Action {
     // Always perform a 'yum update' before installing packages
     // and 'yum clean all' afterwards
     YumInstall yum_install = 7;
+
+    EnvironmentVariable env = 8;
+
+    Untar untar = 9;
   }
 }
 
 message Command {
   // Command to run, as if put in a `RUN` directive in a Dockerfile
   string command = 1;
+}
+
+message Untar {
+  // Untar a file under this directory
+  string sourcepath = 1;
+  // The name of the file to untar
+  string sourcefile = 2;
+}
+
+message EnvironmentVariable {
+  // ENV to set
+  string env = 1;
+  // Value to set
+  string value = 2;
 }
 
 message AptInstall {

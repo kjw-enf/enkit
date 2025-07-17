@@ -3,6 +3,7 @@ package astore
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 
@@ -14,50 +15,102 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-var (
-	// Functions mocked in unit tests
-	storageSignedURL = storage.SignedURL
+// Functions mocked in unit tests
+var storageSignedURL = storage.SignedURL
+
+type authType int
+
+const (
+	// Unsupported; do not use
+	AuthTypeNone authType = iota
+	// Authentication is handled by credentials cookie + SSO
+	AuthTypeOauth
+	// Authentication is handled by JWT token parameter
+	AuthTypeToken
 )
 
-// DownalodArtifact turns an http.Request into an astore.RetrieveRequest, executes it, and invokes the specified handler with the result.
-func (s *Server) DownloadArtifact(prefix string, ehandler DownloadHandler, w http.ResponseWriter, r *http.Request) {
+func getSingleParam(v url.Values, keys ...string) string {
+	for _, k := range keys {
+		if val := v.Get(k); val != "" {
+			return val
+		}
+	}
+	return ""
+}
+
+func getListParam(v url.Values, keys ...string) []string {
+	for _, k := range keys {
+		if val, ok := v[k]; ok {
+			return val
+		}
+	}
+	return nil
+}
+
+// DownloadArtifact turns an http.Request into an astore.RetrieveRequest,
+// executes it, and invokes the specified handler with the result. Authorization
+// is enforced on the request based on the specified `authType`.
+func (s *Server) DownloadArtifact(prefix string, ehandler DownloadHandler, auth authType, w http.ResponseWriter, r *http.Request) {
 	upath := path.Clean(r.URL.Path)
 	if !strings.HasPrefix(upath, prefix) {
 		ehandler(upath, nil, status.Errorf(codes.InvalidArgument, "path %s does not start with the required prefix %s", upath, prefix), w, r)
 		return
 	}
+	astorePath := strings.TrimPrefix(upath, prefix)
 
-	parms := r.URL.Query()
-	arch := parms.Get("a")
-	if arch == "" {
-		arch = parms.Get("arch")
-	}
-	uid := parms.Get("u")
-	if uid == "" {
-		uid = parms.Get("uid")
-	}
-	tag := parms["t"]
-	if len(tag) <= 0 {
-		tag = parms["tag"]
+	params := r.URL.Query()
+	arch := getSingleParam(params, "a", "arch")
+	uid := getSingleParam(params, "u", "uid")
+	tags := getListParam(params, "t", "tag")
+
+	switch auth {
+	default:
+		s.options.logger.Errorf("auth type '%v' not supported by DownloadArtifact()", auth)
+		ehandler(upath, nil, status.Errorf(codes.Unauthenticated, "unhandled auth type: %v", auth), w, r)
+	case AuthTypeOauth:
+		// Assume user has been authenticated at a higher level by this point
+		break
+	case AuthTypeToken:
+		if token := params.Get("token"); token != "" {
+			if err := s.validateToken(token, uid); err != nil {
+				switch {
+				default:
+					s.options.logger.Errorf("Request for uid %q: token validation error: %v", uid, err)
+					ehandler(upath, nil, status.Errorf(codes.Unauthenticated, "invalid token"), w, r)
+					return
+				}
+			}
+		} else {
+			s.options.logger.Errorf("Request for uid %q: no token on request requiring token auth", uid)
+			ehandler(upath, nil, status.Errorf(codes.Unauthenticated, "missing required token in request parameters"), w, r)
+			return
+		}
 	}
 
 	req := &astore.RetrieveRequest{}
-	req.Path = strings.TrimPrefix(upath, prefix)
+	req.Path = astorePath
 	req.Uid = uid
 	req.Architecture = arch
 
-	if len(tag) > 0 {
+	if len(tags) > 0 {
 		req.Tag = &astore.TagSet{}
-		for _, t := range tag {
+		for _, t := range tags {
 			t = strings.TrimSpace(t)
 			if t == "" {
 				continue
 			}
 			req.Tag.Tag = append(req.Tag.Tag, t)
 		}
+	} else if uid != "" {
+		// Fetching by UID only must populate an empty tag set, as no tag set
+		// implies a tag of "latest".
+		req.Tag = &astore.TagSet{}
 	}
 
-	retr, err := s.Retrieve(context.TODO(), req)
+	retr, err := s.Retrieve(r.Context(), req)
+	if err != nil {
+		s.options.logger.Errorf("DownloadArtifact failed (path=%q uid=%q arch=%q tags=%+v): %v", req.Path, req.Uid, req.Architecture, req.Tag, err)
+	}
 	ehandler(upath, retr, err, w, r)
 }
 
